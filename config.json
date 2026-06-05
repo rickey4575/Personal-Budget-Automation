@@ -1,0 +1,52 @@
+{
+  "column_mapping": {
+    "date": [
+      "completed date",
+      "started date",
+      "date"
+    ],
+    "description": [
+      "description"
+    ],
+    "amount": [
+      "amount"
+    ],
+    "fee": [
+      "fee"
+    ]
+  },
+  "amount_style": "signed",
+  "debit_credit_columns": {
+    "debit": [
+      "debit",
+      "withdrawal",
+      "money out"
+    ],
+    "credit": [
+      "credit",
+      "deposit",
+      "money in"
+    ]
+  },
+  "date_format_hint": "",
+  "currency_symbol": "",
+  "fee_handling": "subtract",
+  "type_column": [
+    "type"
+  ],
+  "debit_type_values": [
+    "debit",
+    "payment",
+    "purchase",
+    "card",
+    "withdrawal",
+    "charge"
+  ],
+  "credit_type_values": [
+    "credit",
+    "refund",
+    "deposit",
+    "salary",
+    "income"
+  ]
+}

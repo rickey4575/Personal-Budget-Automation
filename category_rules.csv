@@ -1,0 +1,56 @@
+keyword,category
+salary,Salary
+payroll,Salary
+wages,Salary
+rent,Rent/Mortgage
+mortgage,Rent/Mortgage
+electric,Utilities
+water,Utilities
+gas,Utilities
+internet,Internet/Phone
+phone,Internet/Phone
+mobile,Internet/Phone
+insurance,Insurance
+grocery,Groceries
+supermarket,Groceries
+tesco,Groceries
+asda,Groceries
+sainsbury,Groceries
+lidl,Groceries
+aldi,Groceries
+restaurant,Eating Out
+cafe,Eating Out
+coffee,Eating Out
+deliveroo,Eating Out
+uber eats,Eating Out
+mcdonald,Eating Out
+starbucks,Eating Out
+train,Transport
+bus,Transport
+transport,Transport
+uber,Transport
+fuel,Transport
+petrol,Transport
+amazon,Shopping
+shop,Shopping
+store,Shopping
+clothing,Clothing
+shoes,Clothing
+pharmacy,Health
+doctor,Health
+dentist,Health
+gym,Health
+hotel,Travel
+flight,Travel
+airline,Travel
+booking,Travel
+subscription,Subscriptions
+youtube,Subscriptions
+netflix,Subscriptions
+spotify,Subscriptions
+transfer,Transfers
+savings,Transfers
+vault,Transfers
+exchange,Transfers
+fee,Fees
+overdraft,Fees
