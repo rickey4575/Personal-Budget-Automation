@@ -32,6 +32,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.views import Selection
 
 HERE = Path(__file__).resolve().parent
+DEFAULT_AI_CONFIDENCE_THRESHOLD = 0.8
 
 def load_config(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -77,6 +78,23 @@ def append_category_rules(path: Path, new_rules: dict[str, str]) -> int:
         writer.writerows(rows)
 
     return len(rows)
+
+def import_approved_ai_decisions(path: Path, rules_path: Path) -> int:
+    if not path.exists():
+        return 0
+
+    decisions = pd.read_csv(path)
+    new_rules = {}
+    for _, row in decisions.iterrows():
+        if not _boolish(row.get("approved", False)):
+            continue
+
+        merchant = str(row.get("merchant", "")).strip()
+        category = str(row.get("suggested_category", "")).strip()
+        if merchant and category:
+            new_rules[merchant] = category
+
+    return append_category_rules(rules_path, new_rules)
 
 def list_files(input_path: Path):
     if input_path.is_file():
@@ -367,7 +385,28 @@ def _boolish(value) -> bool:
         return value
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
-def build_ai_decision_rows(groups: list[dict], suggestions: list[dict], categories: list[str]):
+def _confidence_value(value) -> float | None:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(confidence):
+        return None
+    return confidence
+
+def _approval_reason(suggested_category: str, creates_new: bool, matched_existing: bool, confidence: float | None, threshold: float) -> str:
+    reasons = []
+    if not suggested_category:
+        reasons.append("missing_category")
+    if creates_new or (suggested_category and not matched_existing):
+        reasons.append("new_category")
+    if confidence is None:
+        reasons.append("missing_confidence")
+    elif confidence < threshold:
+        reasons.append("low_confidence")
+    return "; ".join(reasons)
+
+def build_ai_decision_rows(groups: list[dict], suggestions: list[dict], categories: list[str], confidence_threshold: float):
     by_merchant = {str(s.get("merchant", "")).strip(): s for s in suggestions if isinstance(s, dict)}
     existing_categories = {c.strip().lower(): c for c in categories}
     rows = []
@@ -379,7 +418,16 @@ def build_ai_decision_rows(groups: list[dict], suggestions: list[dict], categori
         category_key = suggested_category.lower()
         creates_new = _boolish(suggestion.get("create_new_category", False))
         matched_existing = category_key in existing_categories
-        applied = bool(suggested_category and matched_existing and not creates_new)
+        confidence = _confidence_value(suggestion.get("confidence", ""))
+        meets_threshold = confidence is not None and confidence >= confidence_threshold
+        applied = bool(suggested_category and matched_existing and not creates_new and meets_threshold)
+        approval_reason = "" if applied else _approval_reason(
+            suggested_category,
+            creates_new,
+            matched_existing,
+            confidence,
+            confidence_threshold,
+        )
 
         if applied:
             suggested_category = existing_categories[category_key]
@@ -394,18 +442,20 @@ def build_ai_decision_rows(groups: list[dict], suggestions: list[dict], categori
             "last_seen": group["last_seen"],
             "suggested_category": suggested_category,
             "confidence": suggestion.get("confidence", ""),
+            "confidence_threshold": confidence_threshold,
             "create_new_category": creates_new,
             "matched_existing_category": matched_existing,
             "applied": applied,
             "reason": suggestion.get("reason", ""),
+            "approval_reason": approval_reason,
             "needs_approval": not applied,
             "approved": "",
         })
 
     return rows, apply_map
 
-def write_category_suggestions(path: Path, groups: list[dict], suggestions: list[dict], categories: list[str]):
-    rows, _ = build_ai_decision_rows(groups, suggestions, categories)
+def write_category_suggestions(path: Path, groups: list[dict], suggestions: list[dict], categories: list[str], confidence_threshold: float):
+    rows, _ = build_ai_decision_rows(groups, suggestions, categories, confidence_threshold)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
@@ -419,14 +469,14 @@ def apply_ai_categories(tx: pd.DataFrame, apply_map: dict[str, str]) -> pd.DataF
     updated.loc[mask, "Category"] = updated.loc[mask, "Description"].map(apply_map)
     return updated
 
-def run_ai_category_flow(ledger: pd.DataFrame, rules, limit: int, model: str, log_path: Path):
+def run_ai_category_flow(ledger: pd.DataFrame, rules, limit: int, model: str, log_path: Path, confidence_threshold: float):
     groups = uncategorized_groups(ledger, limit)
     if not groups:
         return ledger, {}, 0
 
     categories = available_categories(rules, ledger)
     suggestions = request_gemini_suggestions(groups, categories, model)
-    rows, apply_map = build_ai_decision_rows(groups, suggestions, categories)
+    rows, apply_map = build_ai_decision_rows(groups, suggestions, categories, confidence_threshold)
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(log_path, index=False)
@@ -488,6 +538,26 @@ def _reset_sheet_view(ws, active_cell: str = "A1"):
     ws.sheet_view.topLeftCell = None
     ws.sheet_view.selection = [Selection(activeCell=active_cell, sqref=active_cell)]
 
+def pending_ai_decision_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+
+    decisions = pd.read_csv(path)
+    pending = []
+    for _, row in decisions.iterrows():
+        if _boolish(row.get("needs_approval", False)) and not _boolish(row.get("approved", False)):
+            pending.append({
+                "merchant": row.get("merchant", ""),
+                "count": row.get("count", ""),
+                "total_spend": row.get("total_spend", ""),
+                "suggested_category": row.get("suggested_category", ""),
+                "confidence": row.get("confidence", ""),
+                "approval_reason": row.get("approval_reason", ""),
+                "reason": row.get("reason", ""),
+                "approved": row.get("approved", ""),
+            })
+    return pending
+
 def _configure_period_dropdown(wb, months, selected_period: str):
     ws = _sheet(wb, "Periods")
     _replace_rows_after_header(ws, ["Period"])
@@ -531,7 +601,7 @@ def _ensure_budget_categories(wb, tx: pd.DataFrame):
             ws.append([category, 0])
             existing.add(category.strip().lower())
 
-def _update_dashboard(wb, tx: pd.DataFrame):
+def _update_dashboard(wb, tx: pd.DataFrame, ai_pending_count: int):
     ws = wb["Dashboard"]
     _reset_sheet_view(ws)
 
@@ -553,6 +623,9 @@ def _update_dashboard(wb, tx: pd.DataFrame):
     ws["B10"] = _period_metric_formula("uncategorized_spend")
     ws["A11"] = "Uncategorized Count"
     ws["B11"] = _period_metric_formula("uncategorized_count")
+    ws["A12"] = "AI Decisions Pending"
+    ws["B12"] = ai_pending_count
+    ws["D12"] = "Approve in ai_category_decisions.csv or add a category rule"
 
     ws["A13"] = "Transfers"
     ws["A14"] = "Transfer In"
@@ -601,7 +674,7 @@ def _update_dashboard(wb, tx: pd.DataFrame):
     ws.column_dimensions["A"].width = 28
     ws.column_dimensions["B"].width = 16
     ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["D"].width = 28
     ws.column_dimensions["E"].width = 16
 
 def _update_uncategorized(wb, tx: pd.DataFrame):
@@ -625,7 +698,7 @@ def _update_uncategorized(wb, tx: pd.DataFrame):
     ws.column_dimensions["D"].width = 18
     ws.column_dimensions["E"].width = 12
 
-def update_master_workbook(template_path: Path, workbook_path: Path, tx: pd.DataFrame, selected_period: str):
+def update_master_workbook(template_path: Path, workbook_path: Path, tx: pd.DataFrame, selected_period: str, ai_log_path: Path | None = None):
     if workbook_path.exists():
         wb = load_workbook(workbook_path)
     else:
@@ -639,10 +712,13 @@ def update_master_workbook(template_path: Path, workbook_path: Path, tx: pd.Data
         wsT.append([dt.date() if hasattr(dt, "date") else dt, row["Description"], float(row["Amount"]), row["Category"], row["Month"]])
 
     months = sorted(m for m in tx["Month"].dropna().astype(str).unique() if re.match(r"^\d{4}-\d{2}$", m))
+    pending_ai_rows = pending_ai_decision_rows(ai_log_path) if ai_log_path else []
     _ensure_budget_categories(wb, tx)
     _configure_period_dropdown(wb, months, selected_period)
-    _update_dashboard(wb, tx)
+    _update_dashboard(wb, tx, len(pending_ai_rows))
     _update_uncategorized(wb, tx)
+    if "AI Review" in wb.sheetnames:
+        del wb["AI Review"]
 
     workbook_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(workbook_path)
@@ -662,13 +738,17 @@ def main():
     ap.add_argument("--ai-log", default=str(HERE / "ai_category_decisions.csv"), help="Where to write the AI categorization audit log")
     ap.add_argument("--suggestion-limit", type=int, default=500, help="Maximum uncategorized merchant groups to send to Gemini")
     ap.add_argument("--gemini-model", default="gemini-3.1-flash-lite", help="Gemini model to use for category suggestions")
+    ap.add_argument("--ai-confidence-threshold", type=float, default=DEFAULT_AI_CONFIDENCE_THRESHOLD, help="Minimum Gemini confidence required for automatic categorization")
     args = ap.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
     workbook_path = Path(args.workbook).expanduser().resolve()
     template_path = Path(args.template).expanduser().resolve()
     cfg = load_config(Path(args.config).expanduser().resolve())
-    rules = load_rules(Path(args.rules).expanduser().resolve())
+    rules_path = Path(args.rules).expanduser().resolve()
+    ai_log_path = Path(args.ai_log).expanduser().resolve()
+    imported_approved_count = import_approved_ai_decisions(ai_log_path, rules_path)
+    rules = load_rules(rules_path)
     ledger_path = Path(args.ledger).expanduser().resolve()
 
     tx_all = load_transactions(input_path, cfg, rules)
@@ -687,26 +767,26 @@ def main():
         categories = available_categories(rules, ledger)
         suggestions = request_gemini_suggestions(groups, categories, args.gemini_model)
         suggestions_path = Path(args.suggestions_output).expanduser().resolve()
-        write_category_suggestions(suggestions_path, groups, suggestions, categories)
+        write_category_suggestions(suggestions_path, groups, suggestions, categories, args.ai_confidence_threshold)
         print(f"Wrote category suggestions: {suggestions_path}")
         print("Review the suggestions before adding any rows to category_rules.csv.")
         return
 
     if args.use_ai_categories:
-        ai_log_path = Path(args.ai_log).expanduser().resolve()
         ledger, apply_map, needs_approval_count = run_ai_category_flow(
             ledger,
             rules,
             args.suggestion_limit,
             args.gemini_model,
             ai_log_path,
+            args.ai_confidence_threshold,
         )
-        rules_path = Path(args.rules).expanduser().resolve()
         added_rule_count = append_category_rules(rules_path, apply_map)
         if added_rule_count:
             rules = load_rules(rules_path)
             ledger = clean_transactions(ledger, rules)
         print(f"Wrote AI categorization log: {ai_log_path}")
+        print(f"AI confidence threshold: {args.ai_confidence_threshold}")
         print(f"Applied existing-category AI decisions: {len(apply_map)}")
         print(f"Added category rules: {added_rule_count}")
         if needs_approval_count:
@@ -715,12 +795,18 @@ def main():
     ledger.to_csv(ledger_path, index=False)
 
     latest = detect_latest_month(tx_all) or detect_latest_month(ledger) or datetime.today().strftime("%Y-%m")
+    pending_ai_count = len(pending_ai_decision_rows(ai_log_path))
 
-    update_master_workbook(template_path, workbook_path, ledger, latest)
+    update_master_workbook(template_path, workbook_path, ledger, latest, ai_log_path)
 
     print(f"Updated workbook: {workbook_path}")
     print(f"Updated ledger: {ledger_path}")
-    print("Tip: open the workbook and check 'Uncategorized' to improve your rules.")
+    if imported_approved_count:
+        print(f"Imported approved AI decisions into category rules: {imported_approved_count}")
+    if pending_ai_count:
+        print(f"AI decisions pending approval: {pending_ai_count}")
+        print(f"Set approved=True in {ai_log_path} or manually add rows to category_rules.csv.")
+    print("Tip: check ai_category_decisions.csv for approvals, or manually add reliable merchant rules to category_rules.csv.")
 
 if __name__ == "__main__":
     main()

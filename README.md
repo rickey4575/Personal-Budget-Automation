@@ -86,9 +86,19 @@ AI behavior:
 - Existing keyword rules run first.
 - Gemini is asked only about remaining uncategorized merchant groups.
 - Every AI decision is logged in `ai_category_decisions.csv`.
-- Suggestions matching existing categories are applied automatically.
+- Suggestions matching existing categories are applied automatically only when Gemini confidence is at least `0.8`.
 - Applied existing-category decisions are appended to `category_rules.csv`, so future runs need less AI.
-- Suggested brand-new categories are marked as needing approval and are not applied automatically.
+- Suggested brand-new categories and lower-confidence suggestions are marked as needing approval and are not applied automatically.
+
+Approving AI decisions:
+
+1. Open `ai_category_decisions.csv`.
+2. For any row you accept, set `approved` to `True`.
+3. Run the normal budget update again, or double-click `run_budget_ai.bat`.
+
+Approved rows are automatically imported into `category_rules.csv` on the next run. This works for both new categories and lower-confidence existing-category suggestions. You can also manually add reliable merchant/category rows directly to `category_rules.csv`.
+
+When an approved AI decision introduces a new spending category, the next run also adds that category to the `Budget` sheet in `Budget_Master.xlsx` with a default monthly budget of `0`. `Salary`, `Other Income`, `Transfers`, and `Uncategorized` are excluded from automatic budget-category creation.
 
 ## Important Files
 
@@ -138,11 +148,14 @@ The dashboard separates:
 - Real spending
 - Transfers
 - Uncategorized review items
+- Pending AI category approvals
 - Budget vs actual spending
 
 `Total Spending` excludes `Transfers`. Transfers have their own `Transfer In`, `Transfer Out`, and `Net Transfers` section.
 
 Uncategorized spending is included in `Total Spending` and shown separately in the `Review` section.
+
+The Dashboard `Review` section also shows how many AI decisions are pending approval. Check `ai_category_decisions.csv` for those rows, approve the ones you accept, or manually add a rule to `category_rules.csv`.
 
 ## Privacy
 
